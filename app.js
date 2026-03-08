@@ -188,7 +188,7 @@ function renderStationList(filteredStations, selectedFuel) {
       const fuel = station.fuels[selectedFuel];
       const distance = distanceKm(currentCenter.lat, currentCenter.lon, station.lat, station.lon);
       return `
-        <div class="station-list-item">
+        <div class="station-list-item" data-lat="${station.lat}" data-lon="${station.lon}" style="cursor:pointer">
           <div class="station-list-top">
             <strong>${station.name}</strong>
             <strong>${formatEuro(fuel.price)}</strong>
@@ -200,6 +200,22 @@ function renderStationList(filteredStations, selectedFuel) {
     .join("");
 
   stationListResult.innerHTML = items;
+
+  stationListResult.querySelectorAll(".station-list-item").forEach((el) => {
+    el.addEventListener("click", () => {
+      const lat = parseFloat(el.dataset.lat);
+      const lon = parseFloat(el.dataset.lon);
+      map.flyTo([lat, lon], 16, { duration: 0.8 });
+      stationLayerGroup.eachLayer((layer) => {
+        if (layer instanceof L.Marker) {
+          const pos = layer.getLatLng();
+          if (Math.abs(pos.lat - lat) < 0.0001 && Math.abs(pos.lng - lon) < 0.0001) {
+            layer.openPopup();
+          }
+        }
+      });
+    });
+  });
 }
 
 function stationsInRadius() {
