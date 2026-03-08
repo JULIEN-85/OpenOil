@@ -164,12 +164,6 @@ function renderStations() {
 
     marker.bindPopup(stationPopup(station));
 
-    marker.on("click", () => {
-      currentCenter = { lat: station.lat, lon: station.lon, label: station.name };
-      updateRadiusCircle();
-      renderStations();
-    });
-
     stationLayerGroup.addLayer(marker);
   });
 
