@@ -1,6 +1,6 @@
 const DEFAULT_CENTER = [48.8566, 2.3522];
 const RADIUS_OPTIONS = [10, 20, 30, 40, 50];
-const API_BASE = "https://api.prix-carburants.2aaz.fr";
+const API_BASE = "/api";
 const LIVE_REFRESH_MS = 60000;
 const DEFAULT_FETCH_RADIUS_KM = 50;
 
@@ -43,31 +43,6 @@ const fuelLabels = {
   gpl: "GPL",
 };
 
-function apiFuelToKey(fuel) {
-  const byId = {
-    1: "gazole",
-    2: "sp95",
-    3: "e85",
-    4: "gpl",
-    5: "e10",
-    6: "sp98",
-  };
-
-  if (byId[fuel.id]) {
-    return byId[fuel.id];
-  }
-
-  const shortName = String(fuel.shortName || "").toUpperCase();
-  if (shortName.includes("E85")) return "e85";
-  if (shortName.includes("GPL")) return "gpl";
-  if (shortName.includes("E10")) return "e10";
-  if (shortName.includes("SP98")) return "sp98";
-  if (shortName.includes("SP95")) return "sp95";
-  if (shortName.includes("GAZOLE")) return "gazole";
-
-  return null;
-}
-
 function createRadiusButtons() {
   RADIUS_OPTIONS.forEach((radius) => {
     const button = document.createElement("button");
@@ -100,7 +75,7 @@ function setSelectedRadius(radius, source = "rayon personnalisé") {
   customRadiusInput.value = String(selectedRadius);
   syncRadiusButtons();
   updateRadiusCircle();
-  renderComparison();
+  renderStations();
 
   if (selectedRadius > DEFAULT_FETCH_RADIUS_KM) {
     refreshLiveStations(source);
@@ -166,7 +141,9 @@ function getFilteredStations() {
 
   return stations.filter((station) => {
     const fuel = station.fuels[selectedFuel];
+    const distance = distanceKm(currentCenter.lat, currentCenter.lon, station.lat, station.lon);
     if (!fuel) return false;
+    if (distance > selectedRadius) return false;
     if (onlyAvailable && !fuel.available) return false;
     if (hasMin && fuel.price < minPrice) return false;
     if (hasMax && fuel.price > maxPrice) return false;
@@ -190,7 +167,7 @@ function renderStations() {
     marker.on("click", () => {
       currentCenter = { lat: station.lat, lon: station.lon, label: station.name };
       updateRadiusCircle();
-      renderComparison();
+      renderStations();
     });
 
     stationLayerGroup.addLayer(marker);
@@ -234,7 +211,7 @@ function renderStationList(filteredStations, selectedFuel) {
 function stationsInRadius() {
   const selectedFuel = fuelSelect.value;
 
-  return stations
+  return getFilteredStations()
     .map((station) => {
       const fuel = station.fuels[selectedFuel];
       const distance = distanceKm(currentCenter.lat, currentCenter.lon, station.lat, station.lon);
@@ -290,91 +267,26 @@ function formatSyncTime(date) {
   return date.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-function normalizeApiStation(raw) {
-  const lat = raw?.Coordinates?.latitude;
-  const lon = raw?.Coordinates?.longitude;
-
-  if (typeof lat !== "number" || typeof lon !== "number") {
-    return null;
-  }
-
-  const fuels = {};
-  (raw.Fuels || []).forEach((fuel) => {
-    const key = apiFuelToKey(fuel);
-    const price = fuel?.Price?.value;
-    if (!key || typeof price !== "number") {
-      return;
-    }
-
-    fuels[key] = {
-      price,
-      available: Boolean(fuel.available),
-      update: fuel?.Update?.text || null,
-    };
-  });
-
-  return {
-    id: `api-${raw.id}`,
-    name: raw.name || `Station ${raw.id}`,
-    city: raw?.Address?.city_line || "",
-    lat,
-    lon,
-    lastUpdateText: raw?.LastUpdate?.text || null,
-    fuels,
-  };
-}
-
-async function fetchAroundPage(start, end, lat, lon) {
-  const endpoint = `${API_BASE}/stations/around/${lat},${lon}?responseFields=Fuels,Price`;
+async function fetchLiveStationsFromBackend(lat, lon, radiusKm) {
+  const endpoint = `${API_BASE}/stations/around?lat=${lat}&lon=${lon}&radius=${radiusKm}`;
   const response = await fetch(endpoint, {
     headers: {
-      Range: `station=${start}-${end}`,
+      Accept: "application/json",
     },
   });
 
-  if (!response.ok && response.status !== 206) {
+  if (!response.ok) {
     throw new Error(`API error ${response.status}`);
   }
 
-  const data = await response.json();
-  return Array.isArray(data) ? data : [];
-}
+  const payload = await response.json();
+  const rows = Array.isArray(payload?.stations) ? payload.stations : [];
 
-async function fetchLiveStations(lat, lon, maxRadiusKm) {
-  const pageSize = 20;
-  const maxPages = 50;
-  const targetMeters = maxRadiusKm * 1000;
-  const rawRows = [];
-
-  for (let page = 0; page < maxPages; page += 1) {
-    const start = page * pageSize + 1;
-    const end = start + pageSize - 1;
-    const batch = await fetchAroundPage(start, end, lat, lon);
-
-    if (batch.length === 0) {
-      break;
-    }
-
-    rawRows.push(...batch);
-
-    const farthest = batch[batch.length - 1]?.Distance?.value || batch[batch.length - 1]?.distance || 0;
-    if (batch.length < pageSize || farthest > targetMeters + 5000) {
-      break;
-    }
-  }
-
-  const uniqueById = new Map();
-  rawRows.forEach((row) => {
-    const normalized = normalizeApiStation(row);
-    if (!normalized) return;
-
-    const dist = distanceKm(lat, lon, normalized.lat, normalized.lon);
-    if (dist <= maxRadiusKm) {
-      uniqueById.set(normalized.id, normalized);
-    }
-  });
-
-  return [...uniqueById.values()];
+  return {
+    stations: rows,
+    source: payload?.source || "unknown",
+    updatedAt: payload?.updatedAt || null,
+  };
 }
 
 async function loadLocalFallbackStations() {
@@ -393,15 +305,20 @@ async function refreshLiveStations(source = "auto") {
 
   try {
     const fetchRadiusKm = Math.max(DEFAULT_FETCH_RADIUS_KM, selectedRadius);
-    const liveStations = await fetchLiveStations(currentCenter.lat, currentCenter.lon, fetchRadiusKm);
+    const payload = await fetchLiveStationsFromBackend(currentCenter.lat, currentCenter.lon, fetchRadiusKm);
+    const liveStations = payload.stations;
+
     if (liveStations.length === 0) {
       throw new Error("Aucune station reçue");
     }
 
     stations = liveStations;
     renderStations();
+
+    const syncDate = payload.updatedAt ? new Date(payload.updatedAt) : new Date();
+    const sourceLabel = payload.source === "official" ? "API officielle" : "API fallback";
     setLiveStatus(
-      `Live API · ${stations.length} stations · rayon ${fetchRadiusKm} km · MàJ ${formatSyncTime(new Date())}`
+      `${sourceLabel} · ${stations.length} stations · rayon ${fetchRadiusKm} km · MàJ ${formatSyncTime(syncDate)}`
     );
   } catch (error) {
     if (stations.length === 0) {

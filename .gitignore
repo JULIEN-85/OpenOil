@@ -1,0 +1,12 @@
+node_modules/
+*.log
+site.html
+mappage.html
+geodateo_map.html
+geodateoclusterer.min.js
+utils.js
+core.js
+avg.js
+indexp.js
+apppmc.js
+official_*.json
