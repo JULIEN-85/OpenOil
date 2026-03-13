@@ -38,3 +38,23 @@ Source de secours (fallback si indisponibilité API):
 Le backend met en cache les données et expose l'endpoint local:
 
 - `GET /api/stations/around?lat={lat}&lon={lon}&radius={km}`
+
+## Deployer sur Vercel
+
+Ce projet est configure pour Vercel avec:
+
+- `api/index.js` comme fonction serverless
+- `vercel.json` pour router `/api/*` vers Express et servir le frontend statique
+
+Etapes:
+
+```bash
+npm i -g vercel
+vercel
+vercel --prod
+```
+
+L'URL de production Vercel servira:
+
+- le site sur `/`
+- l'API sur `/api/stations/around?lat={lat}&lon={lon}&radius={km}`

@@ -2,7 +2,6 @@ const express = require("express");
 const path = require("path");
 
 const app = express();
-const PORT = process.env.PORT || 8080;
 
 const OFFICIAL_API_BASE =
   "https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records";
@@ -217,7 +216,7 @@ async function fetchFallbackAround(lat, lon, radiusKm) {
   return [...uniqueById.values()];
 }
 
-app.get("/api/stations/around", async (req, res) => {
+async function stationsAroundHandler(req, res) {
   try {
     const lat = Number(req.query.lat);
     const lon = Number(req.query.lon);
@@ -254,10 +253,18 @@ app.get("/api/stations/around", async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: "Erreur serveur" });
   }
-});
+}
+
+app.get("/api/stations/around", stationsAroundHandler);
+app.get("/stations/around", stationsAroundHandler);
 
 app.use(express.static(path.join(__dirname)));
 
-app.listen(PORT, () => {
-  console.log(`OpenOil server running on http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  const PORT = process.env.PORT || 8080;
+  app.listen(PORT, () => {
+    console.log(`OpenOil server running on http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
