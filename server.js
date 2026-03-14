@@ -6,13 +6,8 @@ const app = express();
 const OFFICIAL_API_BASE =
   "https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records";
 const FALLBACK_API_BASE = "https://api.prix-carburants.2aaz.fr";
-const CACHE_TTL_MS = 2 * 60 * 1000;
 const STALE_HIDE_DAYS = 60;
-
-let cache = {
-  updatedAt: 0,
-  stations: [],
-};
+const MAX_STATIONS_PER_QUERY = 5000;
 
 const fuelFieldMap = {
   gazole: "gazole",
@@ -91,13 +86,18 @@ function normalizeOfficialStation(record) {
   return station;
 }
 
-async function fetchOfficialAllStations() {
+async function fetchOfficialStationsAround(lat, lon, radiusKm) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(radiusKm) || radiusKm <= 0) {
+    throw new Error("paramètres de localisation invalides");
+  }
+
   const limit = 100;
   let offset = 0;
   const all = [];
 
   for (;;) {
-    const url = `${OFFICIAL_API_BASE}?limit=${limit}&offset=${offset}`;
+    const where = `distance(geom, geom'POINT(${lon} ${lat})', ${radiusKm}km)`;
+    const url = `${OFFICIAL_API_BASE}?where=${encodeURIComponent(where)}&limit=${limit}&offset=${offset}`;
     const response = await fetch(url, { headers: { Accept: "application/json" } });
     if (!response.ok) throw new Error(`official api ${response.status}`);
 
@@ -108,24 +108,10 @@ async function fetchOfficialAllStations() {
     if (rows.length < limit) break;
     offset += limit;
 
-    if (offset > 20000) break;
+    if (offset > MAX_STATIONS_PER_QUERY) break;
   }
 
   return all.map(normalizeOfficialStation).filter(Boolean);
-}
-
-async function getOfficialStationsCached() {
-  const now = Date.now();
-  if (cache.stations.length > 0 && now - cache.updatedAt < CACHE_TTL_MS) {
-    return cache.stations;
-  }
-
-  const stations = await fetchOfficialAllStations();
-  cache = {
-    updatedAt: now,
-    stations,
-  };
-  return stations;
 }
 
 function mapApiFuelToKey(fuel) {
@@ -230,14 +216,13 @@ async function stationsAroundHandler(req, res) {
     const safeRadius = Number.isFinite(radius) ? Math.max(1, Math.min(radius, 500)) : 20;
 
     try {
-      const official = await getOfficialStationsCached();
-      const filtered = official.filter((station) => distanceKm(lat, lon, station.lat, station.lon) <= safeRadius);
+      const officialStations = await fetchOfficialStationsAround(lat, lon, safeRadius);
 
       res.json({
         source: "official",
-        updatedAt: new Date(cache.updatedAt).toISOString(),
-        count: filtered.length,
-        stations: filtered,
+        updatedAt: new Date().toISOString(),
+        count: officialStations.length,
+        stations: officialStations,
       });
       return;
     } catch (officialError) {
