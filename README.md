@@ -39,7 +39,7 @@ Le backend met en cache les données et expose l'endpoint local:
 
 - `GET /api/stations/around?lat={lat}&lon={lon}&radius={km}`
 
-## Deployer sur Vercel
+## Deployer sur Vercel (gratuit)
 
 Ce projet est configure pour Vercel avec:
 
@@ -47,7 +47,35 @@ Ce projet est configure pour Vercel avec:
 - `vercel.json` pour router `/api/*` vers Express et servir le frontend statique
 - Requêtes géofiltrées vers l'API officielle (pas de cache global en mémoire)
 
-Etapes:
+### Déploiement automatique via GitHub Actions
+
+Chaque push sur la branche `main` déclenche automatiquement un déploiement sur Vercel grâce au workflow `.github/workflows/deploy.yml`.
+
+**Prérequis — configurer les secrets GitHub du dépôt:**
+
+1. Crée un compte sur [vercel.com](https://vercel.com) (tier gratuit disponible)
+2. Installe la CLI Vercel et lie le projet une première fois en local:
+
+```bash
+npm i -g vercel
+vercel link
+```
+
+Cela crée un fichier `.vercel/project.json` contenant `orgId` et `projectId`.
+
+3. Génère un token d'accès personnel sur [vercel.com/account/tokens](https://vercel.com/account/tokens)
+
+4. Dans les paramètres du dépôt GitHub (`Settings > Secrets and variables > Actions`), ajoute les trois secrets suivants:
+
+| Secret | Valeur |
+|---|---|
+| `VERCEL_TOKEN` | Token généré à l'étape 3 |
+| `VERCEL_ORG_ID` | Valeur de `orgId` dans `.vercel/project.json` |
+| `VERCEL_PROJECT_ID` | Valeur de `projectId` dans `.vercel/project.json` |
+
+Une fois configuré, chaque push sur `main` déploie automatiquement le site.
+
+### Déploiement manuel (optionnel)
 
 ```bash
 npm i -g vercel
