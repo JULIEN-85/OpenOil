@@ -43,8 +43,9 @@ Le backend met en cache les données et expose l'endpoint local:
 
 Ce projet est configure pour Vercel avec:
 
-- `api/index.js` comme fonction serverless
+- `api/index.js` comme fonction serverless (Express)
 - `vercel.json` pour router `/api/*` vers Express et servir le frontend statique
+- Requêtes géofiltrées vers l'API officielle (pas de cache global en mémoire)
 
 Etapes:
 
