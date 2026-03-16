@@ -1,9 +1,15 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OpenOil - Carte carburants</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@600;700&display=swap"
+      rel="stylesheet"
+    />
     <link
       rel="stylesheet"
       href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
@@ -14,22 +20,75 @@
   </head>
   <body>
     <header class="topbar">
-      <h1>OpenOil</h1>
-      <p>Carte des stations, disponibilité carburants et comparaison de prix</p>
-      <div id="liveStatus" class="live-status">Connexion API en cours...</div>
+      <div class="topbar-row">
+        <h1>OpenOil</h1>
+        <label class="lang-switch" for="languageSelect">
+          <span data-i18n>Langue</span>
+          <select id="languageSelect">
+            <option value="fr">Français</option>
+            <option value="en" selected>English</option>
+            <option value="de">Deutsch</option>
+            <option value="es">Español</option>
+            <option value="it">Italiano</option>
+            <option value="pt">Português</option>
+            <option value="nl">Nederlands</option>
+            <option value="sv">Svenska</option>
+            <option value="da">Dansk</option>
+            <option value="no">Norsk</option>
+            <option value="fi">Suomi</option>
+            <option value="is">Íslenska</option>
+            <option value="ga">Gaeilge</option>
+            <option value="cy">Cymraeg</option>
+            <option value="eu">Euskara</option>
+            <option value="ca">Català</option>
+            <option value="gl">Galego</option>
+            <option value="sq">Shqip</option>
+            <option value="bs">Bosanski</option>
+            <option value="hr">Hrvatski</option>
+            <option value="sr">Srpski</option>
+            <option value="sl">Slovenščina</option>
+            <option value="sk">Slovenčina</option>
+            <option value="cs">Čeština</option>
+            <option value="pl">Polski</option>
+            <option value="hu">Magyar</option>
+            <option value="ro">Română</option>
+            <option value="bg">Български</option>
+            <option value="el">Ελληνικά</option>
+            <option value="mk">Македонски</option>
+            <option value="uk">Українська</option>
+            <option value="be">Беларуская</option>
+            <option value="ru">Русский</option>
+            <option value="et">Eesti</option>
+            <option value="lv">Latviešu</option>
+            <option value="lt">Lietuvių</option>
+            <option value="mt">Malti</option>
+            <option value="tr">Türkçe</option>
+            <option value="az">Azərbaycanca</option>
+            <option value="hy">Հայերեն</option>
+            <option value="ka">ქართული</option>
+          </select>
+        </label>
+      </div>
+      <div id="liveStatus" class="live-status" data-i18n>Connexion API en cours...</div>
     </header>
 
     <main class="layout">
       <aside class="panel">
-        <section>
-          <h2>Recherche</h2>
+        <section class="filter-section">
+          <h2>
+            <button class="section-toggle" type="button" aria-expanded="true">
+              <span data-i18n>Recherche</span>
+              <span class="section-toggle-state" data-i18n>Masquer</span>
+            </button>
+          </h2>
+          <div class="section-content">
           <div class="field">
-            <label for="locationInput">Localisation (ville ou adresse)</label>
-            <input id="locationInput" type="text" placeholder="Ex: Lyon Part-Dieu" />
+            <label for="locationInput" data-i18n>Localisation (ville ou adresse)</label>
+            <input id="locationInput" type="text" placeholder="Ex: Lyon Part-Dieu" data-i18n-placeholder />
           </div>
-          <button id="searchLocationBtn" class="btn secondary">Rechercher cette localisation</button>
+          <button id="searchLocationBtn" class="btn secondary" data-i18n>Rechercher cette localisation</button>
           <div class="field">
-            <label for="fuelSelect">Carburant</label>
+            <label for="fuelSelect" data-i18n>Carburant</label>
             <select id="fuelSelect">
               <option value="gazole">Gazole</option>
               <option value="sp95">SP95</option>
@@ -41,38 +100,47 @@
           </div>
           <div class="field inline">
             <input id="onlyAvailable" type="checkbox" checked />
-            <label for="onlyAvailable">Afficher uniquement disponibles</label>
+            <label for="onlyAvailable" data-i18n>Afficher uniquement disponibles</label>
           </div>
-          <div class="field field-2cols">
-            <div>
-              <label for="priceMin">Prix min (€ / L)</label>
-              <input id="priceMin" type="number" min="0" step="0.001" placeholder="1.600" />
-            </div>
-            <div>
-              <label for="priceMax">Prix max (€ / L)</label>
-              <input id="priceMax" type="number" min="0" step="0.001" placeholder="2.000" />
-            </div>
+          <div class="field">
+            <label for="priceMax" data-i18n>Prix max (€ / L)</label>
+            <input id="priceMax" type="number" min="0" step="0.001" placeholder="2.000" />
           </div>
-          <button id="locateBtn" class="btn">Me localiser</button>
-          <button id="refreshBtn" class="btn secondary">Rafraîchir maintenant</button>
+          <button id="locateBtn" class="btn" data-i18n>Me localiser</button>
+          <button id="refreshBtn" class="btn secondary" data-i18n>Rafraîchir maintenant</button>
+          </div>
         </section>
 
-        <section>
-          <h2>Comparaison de prix</h2>
+        <section class="filter-section">
+          <h2>
+            <button class="section-toggle" type="button" aria-expanded="true">
+              <span data-i18n>Comparaison de prix</span>
+              <span class="section-toggle-state" data-i18n>Masquer</span>
+            </button>
+          </h2>
+          <div class="section-content">
           <div class="radii" id="radii"></div>
           <div class="field field-radius-custom">
-            <label for="customRadiusInput">Rayon personnalisé (km)</label>
+            <label for="customRadiusInput" data-i18n>Rayon personnalisé (km)</label>
             <div class="inline-row">
-              <input id="customRadiusInput" type="number" min="1" step="1" placeholder="Ex: 65" />
-              <button id="applyRadiusBtn" class="btn secondary small">Appliquer</button>
+              <input id="customRadiusInput" type="number" min="1" step="1" placeholder="Ex: 65" data-i18n-placeholder />
+              <button id="applyRadiusBtn" class="btn secondary small" data-i18n>Appliquer</button>
             </div>
           </div>
           <div id="comparisonResult" class="result"></div>
+          </div>
         </section>
 
-        <section>
-          <h2>Stations affichées</h2>
+        <section class="filter-section">
+          <h2>
+            <button class="section-toggle" type="button" aria-expanded="true">
+              <span data-i18n>Stations affichées</span>
+              <span class="section-toggle-state" data-i18n>Masquer</span>
+            </button>
+          </h2>
+          <div class="section-content">
           <div id="stationListResult" class="station-list"></div>
+          </div>
         </section>
 
       </aside>
@@ -87,6 +155,90 @@
       integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
       crossorigin=""
     ></script>
+    <script>
+      (function () {
+        // MyMemory – free, no API key needed, ~500 words/day per IP
+        const API = "https://api.mymemory.translated.net/get";
+        const cache = {};
+
+        async function translateOne(text, target) {
+          if (!cache[target]) cache[target] = {};
+          if (text in cache[target]) return cache[target][text];
+          try {
+            const url = `${API}?q=${encodeURIComponent(text)}&langpair=fr|${target}`;
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            const t = data?.responseData?.translatedText ?? text;
+            cache[target][text] = t;
+            return t;
+          } catch (err) {
+            console.warn("MyMemory error:", err);
+            cache[target][text] = text;
+            return text;
+          }
+        }
+
+        async function translatePage(lang) {
+          const els = Array.from(document.querySelectorAll("[data-i18n]"));
+          const pEls = Array.from(document.querySelectorAll("[data-i18n-placeholder]"));
+
+          // Save originals on first run
+          els.forEach((el) => {
+            if (!el.dataset.i18nOrig) el.dataset.i18nOrig = el.textContent.trim();
+          });
+          pEls.forEach((el) => {
+            if (!el.dataset.i18nOrig) el.dataset.i18nOrig = el.placeholder;
+          });
+
+          if (lang === "fr") {
+            els.forEach((el) => { el.textContent = el.dataset.i18nOrig; });
+            pEls.forEach((el) => { el.placeholder = el.dataset.i18nOrig; });
+            document.documentElement.lang = "fr";
+            localStorage.setItem("lang", "fr");
+            return;
+          }
+
+          // Translate all strings in parallel
+          const [tTexts, tPlaces] = await Promise.all([
+            Promise.all(els.map((el) => translateOne(el.dataset.i18nOrig, lang))),
+            Promise.all(pEls.map((el) => translateOne(el.dataset.i18nOrig, lang))),
+          ]);
+
+          els.forEach((el, i) => { el.textContent = tTexts[i]; });
+          pEls.forEach((el, i) => { el.placeholder = tPlaces[i]; });
+          document.documentElement.lang = lang;
+          localStorage.setItem("lang", lang);
+        }
+
+        window.openOilRetranslate = function () {
+          const sel = document.getElementById("languageSelect");
+          if (!sel || sel.value === "fr") {
+            return;
+          }
+          translatePage(sel.value);
+        };
+
+        function init() {
+          const sel = document.getElementById("languageSelect");
+          if (!sel) return;
+
+          // Restore last chosen language
+          const saved = localStorage.getItem("lang");
+          if (saved) {
+            sel.value = saved;
+            translatePage(saved);
+          } else {
+            sel.value = "en";
+            translatePage("en");
+          }
+
+          sel.addEventListener("change", () => translatePage(sel.value));
+        }
+
+        document.addEventListener("DOMContentLoaded", init);
+      })();
+    </script>
     <script src="app.js" type="module"></script>
   </body>
 </html>

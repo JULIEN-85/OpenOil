@@ -14,7 +14,6 @@ const fuelSelect = document.getElementById("fuelSelect");
 const locationInput = document.getElementById("locationInput");
 const searchLocationBtn = document.getElementById("searchLocationBtn");
 const onlyAvailableCheckbox = document.getElementById("onlyAvailable");
-const priceMinInput = document.getElementById("priceMin");
 const priceMaxInput = document.getElementById("priceMax");
 const locateBtn = document.getElementById("locateBtn");
 const refreshBtn = document.getElementById("refreshBtn");
@@ -24,6 +23,7 @@ const applyRadiusBtn = document.getElementById("applyRadiusBtn");
 const comparisonResult = document.getElementById("comparisonResult");
 const stationListResult = document.getElementById("stationListResult");
 const liveStatus = document.getElementById("liveStatus");
+const sectionToggleButtons = document.querySelectorAll(".section-toggle");
 
 let stations = [];
 let stationLayerGroup = L.layerGroup().addTo(map);
@@ -42,6 +42,26 @@ const fuelLabels = {
   e85: "E85",
   gpl: "GPL",
 };
+
+function initFilterSections() {
+  sectionToggleButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const section = button.closest(".filter-section");
+      if (!section) {
+        return;
+      }
+
+      const willExpand = section.classList.contains("collapsed");
+      section.classList.toggle("collapsed", !willExpand);
+      button.setAttribute("aria-expanded", String(willExpand));
+
+      const stateLabel = button.querySelector(".section-toggle-state");
+      if (stateLabel) {
+        stateLabel.textContent = willExpand ? "Masquer" : "Afficher";
+      }
+    });
+  });
+}
 
 function createRadiusButtons() {
   RADIUS_OPTIONS.forEach((radius) => {
@@ -134,9 +154,7 @@ function stationPopup(station) {
 function getFilteredStations() {
   const selectedFuel = fuelSelect.value;
   const onlyAvailable = onlyAvailableCheckbox.checked;
-  const minPrice = Number(priceMinInput.value);
   const maxPrice = Number(priceMaxInput.value);
-  const hasMin = Number.isFinite(minPrice) && minPrice > 0;
   const hasMax = Number.isFinite(maxPrice) && maxPrice > 0;
 
   return stations.filter((station) => {
@@ -145,7 +163,6 @@ function getFilteredStations() {
     if (!fuel) return false;
     if (distance > selectedRadius) return false;
     if (onlyAvailable && !fuel.available) return false;
-    if (hasMin && fuel.price < minPrice) return false;
     if (hasMax && fuel.price > maxPrice) return false;
     return true;
   });
@@ -154,6 +171,9 @@ function getFilteredStations() {
 function renderStations() {
   const selectedFuel = fuelSelect.value;
   const filtered = getFilteredStations();
+  const totalInRadius = stations.filter(
+    (station) => distanceKm(currentCenter.lat, currentCenter.lon, station.lat, station.lon) <= selectedRadius
+  ).length;
 
   stationLayerGroup.clearLayers();
 
@@ -166,6 +186,12 @@ function renderStations() {
 
     stationLayerGroup.addLayer(marker);
   });
+
+  const baseStatus = liveStatus.textContent;
+  if (typeof baseStatus === "string" && baseStatus.trim().length > 0) {
+    const statusPrefix = baseStatus.split(" · ")[0];
+    setLiveStatus(`${statusPrefix} · ${filtered.length}/${totalInRadius} stations affichées · rayon ${selectedRadius} km`);
+  }
 
   renderStationList(filtered, selectedFuel);
   renderComparison();
@@ -190,8 +216,8 @@ function renderStationList(filteredStations, selectedFuel) {
       return `
         <div class="station-list-item" data-lat="${station.lat}" data-lon="${station.lon}" style="cursor:pointer">
           <div class="station-list-top">
-            <strong>${station.name}</strong>
-            <strong>${formatEuro(fuel.price)}</strong>
+            <span class="station-name">${station.name}</span>
+            <span class="station-price">${formatEuro(fuel.price)}</span>
           </div>
           <div class="station-list-meta">${station.city || "Ville inconnue"} · ${distance.toFixed(1)} km</div>
         </div>
@@ -232,11 +258,14 @@ function stationsInRadius() {
 }
 
 function renderComparison() {
-  const selectedFuel = fuelSelect.value;
   const inRange = stationsInRadius();
 
   if (inRange.length === 0) {
-    comparisonResult.innerHTML = `Aucune station avec ${fuelLabels[selectedFuel]} disponible dans ${selectedRadius} km autour de <strong>${currentCenter.label}</strong>.`;
+    comparisonResult.innerHTML =
+      "<div class=\"comparison-empty\" data-i18n>Aucune station disponible avec les filtres actuels.</div>";
+    if (typeof window.openOilRetranslate === "function") {
+      window.openOilRetranslate();
+    }
     return;
   }
 
@@ -244,15 +273,37 @@ function renderComparison() {
   const min = Math.min(...prices);
   const max = Math.max(...prices);
   const avg = prices.reduce((acc, value) => acc + value, 0) / prices.length;
-  const cheapest = inRange[0];
-  const savingPerL = avg - cheapest.fuel.price;
+  const cheapestPrice = min;
+  const savingPerL = avg - cheapestPrice;
 
   comparisonResult.innerHTML = `
-    <strong>${inRange.length}</strong> station(s) trouvée(s) dans <strong>${selectedRadius} km</strong> autour de <strong>${currentCenter.label}</strong><br />
-    Moins cher: <strong>${cheapest.station.name}</strong> (${formatEuro(cheapest.fuel.price)}) à ${cheapest.distance.toFixed(1)} km<br />
-    Prix moyen: <strong>${formatEuro(avg)}</strong> · Min: <strong>${formatEuro(min)}</strong> · Max: <strong>${formatEuro(max)}</strong><br />
-    Économie potentielle: <strong>${formatEuro(savingPerL)}</strong> / litre vs moyenne
+    <div class="comparison-kpis">
+      <article class="kpi-card kpi-card-wide">
+        <div class="kpi-label" data-i18n>Nombre de stations</div>
+        <div class="kpi-value">${inRange.length}</div>
+      </article>
+      <article class="kpi-card kpi-card-accent">
+        <div class="kpi-label" data-i18n>Prix moyen</div>
+        <div class="kpi-value">${formatEuro(avg)}</div>
+      </article>
+      <article class="kpi-card">
+        <div class="kpi-label" data-i18n>Prix minimum</div>
+        <div class="kpi-value">${formatEuro(min)}</div>
+      </article>
+      <article class="kpi-card">
+        <div class="kpi-label" data-i18n>Prix maximum</div>
+        <div class="kpi-value">${formatEuro(max)}</div>
+      </article>
+      <article class="kpi-card kpi-card-saving">
+        <div class="kpi-label" data-i18n>Économie potentielle vs moyenne</div>
+        <div class="kpi-value">${formatEuro(savingPerL)} <span data-i18n>/ litre</span></div>
+      </article>
+    </div>
   `;
+
+  if (typeof window.openOilRetranslate === "function") {
+    window.openOilRetranslate();
+  }
 }
 
 function updateRadiusCircle() {
@@ -295,6 +346,7 @@ async function fetchLiveStationsFromBackend(lat, lon, radiusKm) {
   return {
     stations: rows,
     source: payload?.source || "unknown",
+    sources: Array.isArray(payload?.sources) ? payload.sources : [],
     updatedAt: payload?.updatedAt || null,
   };
 }
@@ -317,16 +369,49 @@ async function refreshLiveStations(source = "auto") {
     const fetchRadiusKm = Math.max(DEFAULT_FETCH_RADIUS_KM, selectedRadius);
     const payload = await fetchLiveStationsFromBackend(currentCenter.lat, currentCenter.lon, fetchRadiusKm);
     const liveStations = payload.stations;
+    const sourceList = Array.isArray(payload.sources) ? payload.sources : [];
+    const sourceNames = {
+      official: "France",
+      fallback: "France (fallback)",
+      tankerkonig: "Allemagne",
+      "fuelfeed-uk": "Royaume-Uni",
+      "cma-uk": "Royaume-Uni (CMA)",
+      "directlease-benelux": "Benelux (DirectLease)",
+      "anwb-benelux": "Benelux (ANWB)",
+    };
+
+    const sourceLabel =
+      payload.source === "mixed"
+        ? sourceList.map((src) => sourceNames[src] || src).filter(Boolean).join(" + ") || "Multi-source"
+        : payload.source === "official"
+        ? "France"
+        : payload.source === "tankerkonig"
+          ? "Allemagne"
+          : payload.source === "fuelfeed-uk"
+            ? "Royaume-Uni"
+              : payload.source === "cma-uk"
+                ? "Royaume-Uni (CMA)"
+                : payload.source === "directlease-benelux"
+                  ? "Benelux (DirectLease)"
+                  : payload.source === "anwb-benelux"
+                    ? "Benelux (ANWB)"
+            : payload.source === "unavailable"
+              ? "Sources indisponibles"
+              : payload.source === "fallback"
+                ? "France (fallback)"
+                : "API fallback";
 
     if (liveStations.length === 0) {
-      throw new Error("Aucune station reçue");
+      stations = [];
+      renderStations();
+      setLiveStatus(`${sourceLabel} · 0 station · rayon ${fetchRadiusKm} km`);
+      return;
     }
 
     stations = liveStations;
     renderStations();
 
     const syncDate = payload.updatedAt ? new Date(payload.updatedAt) : new Date();
-    const sourceLabel = payload.source === "official" ? "API officielle" : "API fallback";
     setLiveStatus(
       `${sourceLabel} · ${stations.length} stations · rayon ${fetchRadiusKm} km · MàJ ${formatSyncTime(syncDate)}`
     );
@@ -364,7 +449,9 @@ async function searchLocation(query) {
   setLiveStatus("Recherche de localisation...");
 
   try {
-    const endpoint = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(trimmedQuery)}`;
+    const endpoint =
+      `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&countrycodes=fr,de,gb` +
+      `&q=${encodeURIComponent(trimmedQuery)}`;
     const response = await fetch(endpoint, {
       headers: {
         Accept: "application/json",
@@ -382,7 +469,28 @@ async function searchLocation(query) {
       return;
     }
 
-    const top = results[0];
+    const ordered = [...results].sort((a, b) => {
+      const aLat = Number(a.lat);
+      const aLon = Number(a.lon);
+      const bLat = Number(b.lat);
+      const bLon = Number(b.lon);
+
+      const aDist = Number.isFinite(aLat) && Number.isFinite(aLon)
+        ? distanceKm(currentCenter.lat, currentCenter.lon, aLat, aLon)
+        : Number.POSITIVE_INFINITY;
+      const bDist = Number.isFinite(bLat) && Number.isFinite(bLon)
+        ? distanceKm(currentCenter.lat, currentCenter.lon, bLat, bLon)
+        : Number.POSITIVE_INFINITY;
+
+      const aImportance = Number(a.importance) || 0;
+      const bImportance = Number(b.importance) || 0;
+
+      const scoreA = aImportance - aDist / 500;
+      const scoreB = bImportance - bDist / 500;
+      return scoreB - scoreA;
+    });
+
+    const top = ordered[0];
     const lat = Number(top.lat);
     const lon = Number(top.lon);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
@@ -409,10 +517,10 @@ function startLiveRefreshLoop() {
 async function init() {
   createRadiusButtons();
   updateRadiusCircle();
+  initFilterSections();
 
   fuelSelect.addEventListener("change", renderStations);
   onlyAvailableCheckbox.addEventListener("change", renderStations);
-  priceMinInput.addEventListener("input", renderStations);
   priceMaxInput.addEventListener("input", renderStations);
   refreshBtn.addEventListener("click", () => refreshLiveStations("manuel"));
   applyRadiusBtn.addEventListener("click", () => {

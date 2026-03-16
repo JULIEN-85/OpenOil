@@ -6,8 +6,85 @@ const app = express();
 const OFFICIAL_API_BASE =
   "https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records";
 const FALLBACK_API_BASE = "https://api.prix-carburants.2aaz.fr";
+const TANKERKOENIG_API_BASE = "https://creativecommons.tankerkoenig.de/json";
+const UK_MAPBOX_API_BASE = "https://fuelaround.me/api/data.mapbox";
+const BENELUX_DIRECTLEASE_PLACES_API =
+  "https://tankservice.app-it-up.com/Tankservice/v2/places?fmt=web&country=NL&country=BE&lang=en";
+const BENELUX_DIRECTLEASE_PLACE_DETAIL_API =
+  "https://tankservice.app-it-up.com/Tankservice/v2/places/{ID}?_v48&lang=en";
+const BENELUX_ANWB_API_BASE = "https://api.anwb.nl/routing/points-of-interest/v3/all?type-filter=FUEL_STATION";
+const UK_CMA_FEEDS = [
+  {
+    provider: "bp",
+    url: "https://www.bp.com/en_gb/united-kingdom/home/fuelprices/fuel_prices_data.json",
+  },
+  {
+    provider: "tesco",
+    url: "https://www.tesco.com/fuel_prices/fuel_prices_data.json",
+  },
+  {
+    provider: "sainsburys",
+    url: "https://api.sainsburys.co.uk/v1/exports/latest/fuel_prices_data.json",
+  },
+  {
+    provider: "shell",
+    url: "https://www.shell.co.uk/fuel-prices-data.html",
+  },
+  {
+    provider: "mfg",
+    url: "https://fuel.motorfuelgroup.com/fuel_prices_data.json",
+  },
+  {
+    provider: "jet",
+    url: "https://jetlocal.co.uk/fuel_prices_data.json",
+  },
+  {
+    provider: "rontec",
+    url: "https://www.rontec-servicestations.co.uk/fuel-prices/data/fuel_prices_data.json",
+  },
+];
+const TANKERKOENIG_API_KEY = String(
+  process.env.TANKERKOENIG_API_KEY || "ca388ee6-3614-41b9-863d-7f008e646c3d"
+)
+  .replace(/\s+/g, "")
+  .trim();
+const CACHE_TTL_MS = 2 * 60 * 1000;
+const STALE_HIDE_DAYS = 60;
+const GERMANY_API_RADIUS_KM = 24;
+const GERMANY_MAX_RADIUS_KM = 100;
+const UK_MAX_RADIUS_KM = 250;
+const BENELUX_MAX_RADIUS_KM = 500;
+const FRANCE_BOUNDS = {
+  minLat: 41,
+  maxLat: 51.5,
+  minLon: -5.5,
+  maxLon: 9.8,
+};
+const GERMANY_BOUNDS = {
+  minLat: 47.2,
+  maxLat: 55.1,
+  minLon: 5.8,
+  maxLon: 15.1,
+};
+const UK_BOUNDS = {
+  minLat: 49.5,
+  maxLat: 61,
+  minLon: -8.5,
+  maxLon: 2.2,
+};
+const BENELUX_BOUNDS = {
+  minLat: 49.3,
+  maxLat: 53.9,
+  minLon: 2.4,
+  maxLon: 7.4,
+};
 const STALE_HIDE_DAYS = 60;
 const MAX_STATIONS_PER_QUERY = 5000;
+
+let cache = {
+  updatedAt: 0,
+  stations: [],
+};
 
 const fuelFieldMap = {
   gazole: "gazole",
@@ -28,6 +105,56 @@ function distanceKm(lat1, lon1, lat2, lon2) {
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
+}
+
+function offsetCoordinateKm(lat, lon, northKm, eastKm) {
+  const latOffset = northKm / 110.574;
+  const lonDivisor = 111.32 * Math.cos((lat * Math.PI) / 180);
+  const lonOffset = Math.abs(lonDivisor) < 1e-6 ? 0 : eastKm / lonDivisor;
+
+  return {
+    lat: lat + latOffset,
+    lon: lon + lonOffset,
+  };
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function circleIntersectsBounds(lat, lon, radiusKm, bounds) {
+  const nearestLat = clamp(lat, bounds.minLat, bounds.maxLat);
+  const nearestLon = clamp(lon, bounds.minLon, bounds.maxLon);
+  return distanceKm(lat, lon, nearestLat, nearestLon) <= radiusKm;
+}
+
+function buildGermanySearchCenters(lat, lon, radiusKm) {
+  const safeRadius = Math.max(1, Math.min(radiusKm, GERMANY_MAX_RADIUS_KM));
+  const stepKm = GERMANY_API_RADIUS_KM * Math.SQRT2;
+  const offsets = [];
+
+  for (let northKm = -safeRadius; northKm <= safeRadius; northKm += stepKm) {
+    offsets.push(northKm);
+  }
+
+  if (!offsets.some((value) => Math.abs(value) < 0.001)) {
+    offsets.push(0);
+  }
+
+  const uniqueOffsets = [...new Set(offsets.map((value) => Number(value.toFixed(3))))].sort((a, b) => a - b);
+  const centers = [];
+
+  uniqueOffsets.forEach((northKm) => {
+    uniqueOffsets.forEach((eastKm) => {
+      if (Math.hypot(northKm, eastKm) > safeRadius + GERMANY_API_RADIUS_KM) {
+        return;
+      }
+
+      centers.push(offsetCoordinateKm(lat, lon, northKm, eastKm));
+    });
+  });
+
+  return centers;
 }
 
 function parseDateMaybe(value) {
@@ -157,6 +284,602 @@ function normalizeFallbackStation(raw) {
   };
 }
 
+function normalizeGermanyStation(raw) {
+  const lat = raw?.lat;
+  const lon = raw?.lng;
+  if (typeof lat !== "number" || typeof lon !== "number") return null;
+
+  const fuels = {};
+  const available = Boolean(raw?.isOpen);
+
+  if (typeof raw?.diesel === "number") {
+    fuels.gazole = { price: raw.diesel, available, update: null };
+  }
+
+  if (typeof raw?.e5 === "number") {
+    fuels.sp95 = { price: raw.e5, available, update: null };
+  }
+
+  if (typeof raw?.e10 === "number") {
+    fuels.e10 = { price: raw.e10, available, update: null };
+  }
+
+  if (Object.keys(fuels).length === 0) return null;
+
+  const stationName = raw?.name || raw?.brand || raw?.street || `Station ${raw?.id || raw?.uuid || "DE"}`;
+
+  return {
+    id: `de-${raw?.id || raw?.uuid || stationName}`,
+    name: stationName,
+    city: raw?.place || "",
+    lat,
+    lon,
+    lastUpdateText: null,
+    fuels,
+  };
+}
+
+function normalizeUkFuelKey(value) {
+  const key = String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  if (!key) return null;
+  if (key.includes("diesel")) return "gazole";
+  if (key.includes("super_unleaded") || key.includes("premium_unleaded")) return "sp98";
+  if (key.includes("unleaded") || key === "e5") return "sp95";
+  if (key === "e10") return "e10";
+  if (key.includes("lpg") || key.includes("autogas")) return "gpl";
+  return null;
+}
+
+function normalizeBeneluxFuelKey(value) {
+  const key = String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  if (!key) return null;
+  if (key.includes("diesel")) return "gazole";
+  if (key.includes("autogas") || key.includes("lpg")) return "gpl";
+  if (key.includes("euro98") || key.includes("super_plus") || key.includes("e5")) return "sp98";
+  if (key.includes("euro95") || key.includes("e10") || key.includes("unleaded")) return "e10";
+  return null;
+}
+
+function normalizedStationIdentity(station) {
+  const normalizedName = String(station?.name || "station")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+  const latKey = Number.isFinite(station?.lat) ? station.lat.toFixed(4) : "na";
+  const lonKey = Number.isFinite(station?.lon) ? station.lon.toFixed(4) : "na";
+  return `${normalizedName}|${latKey}|${lonKey}`;
+}
+
+function stationUpdateDate(station) {
+  if (station?.updatedAtIso) {
+    const parsedIso = parseDateMaybe(station.updatedAtIso);
+    if (parsedIso) return parsedIso;
+  }
+
+  return parseDateMaybe(station?.lastUpdateText || null);
+}
+
+function pickNewestStation(existing, incoming) {
+  const existingDate = stationUpdateDate(existing);
+  const incomingDate = stationUpdateDate(incoming);
+
+  if (!existingDate && incomingDate) return incoming;
+  if (existingDate && !incomingDate) return existing;
+  if (existingDate && incomingDate) {
+    if (incomingDate > existingDate) return incoming;
+    if (existingDate > incomingDate) return existing;
+  }
+
+  const existingFuelCount = Object.keys(existing?.fuels || {}).length;
+  const incomingFuelCount = Object.keys(incoming?.fuels || {}).length;
+  return incomingFuelCount > existingFuelCount ? incoming : existing;
+}
+
+function dedupeStationsPreferNewest(stations) {
+  const byIdentity = new Map();
+
+  stations.forEach((station) => {
+    if (!station) return;
+
+    const key = normalizedStationIdentity(station);
+    const existing = byIdentity.get(key);
+    if (!existing) {
+      byIdentity.set(key, station);
+      return;
+    }
+
+    byIdentity.set(key, pickNewestStation(existing, station));
+  });
+
+  return [...byIdentity.values()];
+}
+
+function normalizeUkStation(feature) {
+  const coords = feature?.geometry?.coordinates;
+  const lon = Array.isArray(coords) ? Number(coords[0]) : NaN;
+  const lat = Array.isArray(coords) ? Number(coords[1]) : NaN;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  const props = feature?.properties || {};
+  const fuels = {};
+
+  if (props.grouped_fuels && typeof props.grouped_fuels === "object") {
+    Object.entries(props.grouped_fuels).forEach(([groupKey, value]) => {
+      const key = normalizeUkFuelKey(groupKey);
+      const price = Number(value?.price);
+      if (!key || !Number.isFinite(price)) return;
+
+      fuels[key] = {
+        price,
+        available: true,
+        update: null,
+      };
+    });
+  }
+
+  if (Object.keys(fuels).length === 0 && props.fuel_prices && typeof props.fuel_prices === "object") {
+    Object.entries(props.fuel_prices).forEach(([rawKey, rawPrice]) => {
+      const key = normalizeUkFuelKey(rawKey);
+      const price = Number(rawPrice);
+      if (!key || !Number.isFinite(price)) return;
+
+      fuels[key] = {
+        price,
+        available: true,
+        update: null,
+      };
+    });
+  }
+
+  if (Object.keys(fuels).length === 0) return null;
+
+  const stationId = props.station_id || `${props.brand || "UK"}-${lat.toFixed(5)}-${lon.toFixed(5)}`;
+  const stationName = props.brand || props.title || `Station ${stationId}`;
+
+  return {
+    id: `uk-${stationId}`,
+    name: stationName,
+    city: props.postcode || "",
+    lat,
+    lon,
+    lastUpdateText: null,
+    updatedAtIso: null,
+    fuels,
+  };
+}
+
+function normalizeCmaUkStation(raw, providerName, datasetUpdatedAt) {
+  const lat = Number(raw?.location?.latitude);
+  const lon = Number(raw?.location?.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  const fuels = {};
+  const prices = raw?.prices && typeof raw.prices === "object" ? raw.prices : {};
+
+  Object.entries(prices).forEach(([fuelKeyRaw, fuelPriceRaw]) => {
+    const fuelKey = normalizeUkFuelKey(fuelKeyRaw);
+    const price = Number(fuelPriceRaw);
+    if (!fuelKey || !Number.isFinite(price)) return;
+
+    fuels[fuelKey] = {
+      price,
+      available: true,
+      update: null,
+    };
+  });
+
+  if (Object.keys(fuels).length === 0) return null;
+
+  const stationUpdated = parseDateMaybe(raw?.updated || raw?.last_updated) || datasetUpdatedAt || null;
+  const stationId = raw?.site_id || `${providerName}-${lat.toFixed(5)}-${lon.toFixed(5)}`;
+
+  return {
+    id: `ukcma-${providerName}-${stationId}`,
+    name: raw?.brand || providerName.toUpperCase(),
+    city: raw?.postcode || "",
+    lat,
+    lon,
+    lastUpdateText: stationUpdated ? stationUpdated.toLocaleString("en-GB") : null,
+    updatedAtIso: stationUpdated ? stationUpdated.toISOString() : null,
+    fuels,
+  };
+}
+
+async function fetchUkFuelFeedAround(lat, lon, radiusKm) {
+  const safeRadius = Math.max(1, Math.min(radiusKm, UK_MAX_RADIUS_KM));
+  const southWest = offsetCoordinateKm(lat, lon, -safeRadius, -safeRadius);
+  const northEast = offsetCoordinateKm(lat, lon, safeRadius, safeRadius);
+
+  const bbox = `${southWest.lon},${southWest.lat},${northEast.lon},${northEast.lat}`;
+  const center = `${lon},${lat}`;
+  const url =
+    `${UK_MAPBOX_API_BASE}?bbox=${encodeURIComponent(bbox)}` +
+    `&center=${encodeURIComponent(center)}&limit=2000`;
+
+  const response = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!response.ok) {
+    throw new Error(`uk api ${response.status}`);
+  }
+
+  const payload = await response.json();
+  const features = Array.isArray(payload?.features) ? payload.features : [];
+  const uniqueById = new Map();
+
+  features.forEach((feature) => {
+    const normalized = normalizeUkStation(feature);
+    if (!normalized) return;
+
+    const d = distanceKm(lat, lon, normalized.lat, normalized.lon);
+    if (d > safeRadius) return;
+
+    uniqueById.set(normalized.id, normalized);
+  });
+
+  return [...uniqueById.values()];
+}
+
+async function fetchUkCmaAround(lat, lon, radiusKm) {
+  const safeRadius = Math.max(1, Math.min(radiusKm, UK_MAX_RADIUS_KM));
+  const allStations = [];
+  const failedFeeds = [];
+
+  const results = await Promise.allSettled(
+    UK_CMA_FEEDS.map(async (feed) => {
+      const response = await fetch(feed.url, {
+        headers: {
+          Accept: "application/json,text/plain,*/*",
+          "User-Agent": "Mozilla/5.0",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`${feed.provider}: ${response.status}`);
+      }
+
+      const text = await response.text();
+      let payload = null;
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        throw new Error(`${feed.provider}: invalid json`);
+      }
+
+      const feedUpdatedAt = parseDateMaybe(payload?.last_updated || payload?.lastUpdated || null);
+      const rawStations = Array.isArray(payload?.stations) ? payload.stations : [];
+
+      rawStations.forEach((rawStation) => {
+        const normalized = normalizeCmaUkStation(rawStation, feed.provider, feedUpdatedAt);
+        if (!normalized) return;
+
+        const d = distanceKm(lat, lon, normalized.lat, normalized.lon);
+        if (d > safeRadius) return;
+
+        allStations.push(normalized);
+      });
+    })
+  );
+
+  results.forEach((result) => {
+    if (result.status === "rejected") {
+      failedFeeds.push(String(result.reason?.message || "uk-cma feed error"));
+    }
+  });
+
+  return {
+    stations: dedupeStationsPreferNewest(allStations),
+    failedFeeds,
+  };
+}
+
+async function fetchUkAround(lat, lon, radiusKm) {
+  try {
+    const stations = await fetchUkFuelFeedAround(lat, lon, radiusKm);
+    if (stations.length > 0) {
+      return {
+        source: "fuelfeed-uk",
+        stations,
+        failedSources: [],
+      };
+    }
+  } catch (error) {
+    const cma = await fetchUkCmaAround(lat, lon, radiusKm);
+    return {
+      source: "cma-uk",
+      stations: cma.stations,
+      failedSources: [`fuelfeed-uk: ${String(error?.message || "error")}`, ...cma.failedFeeds],
+    };
+  }
+
+  const cma = await fetchUkCmaAround(lat, lon, radiusKm);
+  if (cma.stations.length > 0) {
+    return {
+      source: "cma-uk",
+      stations: cma.stations,
+      failedSources: cma.failedFeeds,
+    };
+  }
+
+  return {
+    source: "fuelfeed-uk",
+    stations: [],
+    failedSources: cma.failedFeeds,
+  };
+}
+
+function normalizeBeneluxAnwbStation(raw, fallbackName = "Benelux station") {
+  const lat = Number(raw?.coordinates?.latitude);
+  const lon = Number(raw?.coordinates?.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  const fuels = {};
+  const prices = Array.isArray(raw?.prices) ? raw.prices : [];
+  prices.forEach((priceItem) => {
+    const fuelKey = normalizeBeneluxFuelKey(priceItem?.fuelType || priceItem?.fuelName || "");
+    const price = Number(priceItem?.value ?? priceItem?.price);
+    if (!fuelKey || !Number.isFinite(price)) return;
+
+    fuels[fuelKey] = {
+      price,
+      available: true,
+      update: null,
+    };
+  });
+
+  if (Object.keys(fuels).length === 0) return null;
+
+  const address = raw?.address || {};
+  const city = address.city || address.postalCode || "";
+  const stationId = raw?.id || `${lat.toFixed(5)}-${lon.toFixed(5)}`;
+
+  return {
+    id: `benelux-anwb-${stationId}`,
+    name: raw?.title || fallbackName,
+    city,
+    lat,
+    lon,
+    lastUpdateText: null,
+    updatedAtIso: null,
+    fuels,
+  };
+}
+
+function normalizeBeneluxDirectLeaseStation(detail, baseStation) {
+  const lat = Number(detail?.lat ?? baseStation?.lat);
+  const lon = Number(detail?.lng ?? baseStation?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  const fuels = {};
+  const fuelCollections = [detail?.prices, detail?.fuels, detail?.fuelPrices];
+
+  fuelCollections.forEach((collection) => {
+    if (!collection) return;
+    const entries = Array.isArray(collection) ? collection : Object.values(collection);
+
+    entries.forEach((fuelItem) => {
+      const fuelKey = normalizeBeneluxFuelKey(
+        fuelItem?.fuelType || fuelItem?.type || fuelItem?.fuelName || fuelItem?.name || ""
+      );
+      const price = Number(fuelItem?.value ?? fuelItem?.price ?? fuelItem?.amount);
+      if (!fuelKey || !Number.isFinite(price)) return;
+
+      fuels[fuelKey] = {
+        price,
+        available: true,
+        update: null,
+      };
+    });
+  });
+
+  if (Object.keys(fuels).length === 0) return null;
+
+  const stationUpdated =
+    parseDateMaybe(detail?.updatedAt || detail?.updated || detail?.lastUpdated || detail?.timestamp) || null;
+  const stationId = detail?.id || baseStation?.id || `${lat.toFixed(5)}-${lon.toFixed(5)}`;
+
+  return {
+    id: `benelux-dl-${stationId}`,
+    name: detail?.name || baseStation?.name || "Benelux station",
+    city: detail?.city || baseStation?.city || "",
+    lat,
+    lon,
+    lastUpdateText: stationUpdated ? stationUpdated.toLocaleString("en-GB") : null,
+    updatedAtIso: stationUpdated ? stationUpdated.toISOString() : null,
+    fuels,
+  };
+}
+
+async function fetchBeneluxDirectLeaseAround(lat, lon, radiusKm) {
+  const safeRadius = Math.max(1, Math.min(radiusKm, BENELUX_MAX_RADIUS_KM));
+  const response = await fetch(BENELUX_DIRECTLEASE_PLACES_API, {
+    headers: {
+      Accept: "application/json,text/plain,*/*",
+      "User-Agent": "Mozilla/5.0",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`directlease list ${response.status}`);
+  }
+
+  const payload = await response.json();
+  const list = Array.isArray(payload) ? payload : [];
+  const nearby = list
+    .filter((row) => {
+      const rowLat = Number(row?.lat);
+      const rowLon = Number(row?.lng);
+      if (!Number.isFinite(rowLat) || !Number.isFinite(rowLon)) return false;
+      return distanceKm(lat, lon, rowLat, rowLon) <= safeRadius;
+    })
+    .slice(0, 200);
+
+  if (nearby.length === 0) {
+    return { stations: [], failedFeeds: [] };
+  }
+
+  const probeId = nearby[0]?.id;
+  const probeUrl = BENELUX_DIRECTLEASE_PLACE_DETAIL_API.replace("{ID}", encodeURIComponent(String(probeId)));
+  const probeResponse = await fetch(probeUrl, {
+    headers: {
+      Accept: "application/json,text/plain,*/*",
+      "User-Agent": "Mozilla/5.0",
+    },
+  });
+
+  if (probeResponse.status === 401) {
+    throw new Error("directlease detail authentication required");
+  }
+
+  if (!probeResponse.ok) {
+    throw new Error(`directlease detail ${probeResponse.status}`);
+  }
+
+  const settled = await Promise.allSettled(
+    nearby.map(async (baseStation) => {
+      const detailUrl = BENELUX_DIRECTLEASE_PLACE_DETAIL_API.replace(
+        "{ID}",
+        encodeURIComponent(String(baseStation.id))
+      );
+      const detailResp = await fetch(detailUrl, {
+        headers: {
+          Accept: "application/json,text/plain,*/*",
+          "User-Agent": "Mozilla/5.0",
+        },
+      });
+
+      if (!detailResp.ok) {
+        throw new Error(`directlease ${baseStation.id}: ${detailResp.status}`);
+      }
+
+      const detailPayload = await detailResp.json();
+      const normalized = normalizeBeneluxDirectLeaseStation(detailPayload, baseStation);
+      return normalized;
+    })
+  );
+
+  const stations = settled
+    .filter((item) => item.status === "fulfilled")
+    .map((item) => item.value)
+    .filter(Boolean);
+
+  const failedFeeds = settled
+    .filter((item) => item.status === "rejected")
+    .map((item) => String(item.reason?.message || "directlease detail error"));
+
+  return {
+    stations: dedupeStationsPreferNewest(stations),
+    failedFeeds,
+  };
+}
+
+async function fetchBeneluxAnwbAround(lat, lon, radiusKm) {
+  const safeRadius = Math.max(1, Math.min(radiusKm, BENELUX_MAX_RADIUS_KM));
+  const southWest = offsetCoordinateKm(lat, lon, -safeRadius, -safeRadius);
+  const northEast = offsetCoordinateKm(lat, lon, safeRadius, safeRadius);
+  const bbox = `${southWest.lat},${southWest.lon},${northEast.lat},${northEast.lon}`;
+  const url = `${BENELUX_ANWB_API_BASE}&bounding-box-filter=${encodeURIComponent(bbox)}`;
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json,text/plain,*/*",
+      "User-Agent": "Mozilla/5.0",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`anwb ${response.status}`);
+  }
+
+  const payload = await response.json();
+  const rows = Array.isArray(payload?.value) ? payload.value : [];
+  const stations = [];
+
+  rows.forEach((row) => {
+    const normalized = normalizeBeneluxAnwbStation(row);
+    if (!normalized) return;
+
+    const d = distanceKm(lat, lon, normalized.lat, normalized.lon);
+    if (d <= safeRadius) stations.push(normalized);
+  });
+
+  return dedupeStationsPreferNewest(stations);
+}
+
+async function fetchBeneluxAround(lat, lon, radiusKm) {
+  try {
+    const directLease = await fetchBeneluxDirectLeaseAround(lat, lon, radiusKm);
+    if (directLease.stations.length > 0) {
+      return {
+        source: "directlease-benelux",
+        stations: directLease.stations,
+        failedSources: directLease.failedFeeds,
+      };
+    }
+
+    const anwbStations = await fetchBeneluxAnwbAround(lat, lon, radiusKm);
+    return {
+      source: "anwb-benelux",
+      stations: anwbStations,
+      failedSources: directLease.failedFeeds,
+    };
+  } catch (directLeaseError) {
+    const anwbStations = await fetchBeneluxAnwbAround(lat, lon, radiusKm);
+    return {
+      source: "anwb-benelux",
+      stations: anwbStations,
+      failedSources: [String(directLeaseError?.message || "directlease error")],
+    };
+  }
+}
+
+async function fetchGermanyAround(lat, lon, radiusKm) {
+  if (!TANKERKOENIG_API_KEY) {
+    throw new Error("missing tankerkoenig api key");
+  }
+
+  const centers = buildGermanySearchCenters(lat, lon, radiusKm);
+  const responses = await Promise.all(
+    centers.map(async (center) => {
+      const url =
+        `${TANKERKOENIG_API_BASE}/list.php?lat=${center.lat}&lng=${center.lon}` +
+        `&rad=${GERMANY_API_RADIUS_KM}&sort=dist&type=all&apikey=${encodeURIComponent(TANKERKOENIG_API_KEY)}`;
+
+      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      if (!response.ok) {
+        throw new Error(`tankerkonig api ${response.status}`);
+      }
+
+      const payload = await response.json();
+      if (payload?.status !== "ok") {
+        throw new Error(`tankerkonig status ${payload?.status || "unknown"}`);
+      }
+
+      return Array.isArray(payload?.stations) ? payload.stations : [];
+    })
+  );
+
+  const uniqueById = new Map();
+
+  responses.flat().forEach((row) => {
+    const normalized = normalizeGermanyStation(row);
+    if (!normalized) return;
+
+    const distance = distanceKm(lat, lon, normalized.lat, normalized.lon);
+    if (distance > radiusKm) return;
+
+    uniqueById.set(normalized.id, normalized);
+  });
+
+  return [...uniqueById.values()];
+}
+
 async function fetchFallbackAround(lat, lon, radiusKm) {
   const pageSize = 20;
   const maxPages = 200;
@@ -202,6 +925,37 @@ async function fetchFallbackAround(lat, lon, radiusKm) {
   return [...uniqueById.values()];
 }
 
+async function fetchFranceAround(lat, lon, radiusKm) {
+  try {
+    const official = await getOfficialStationsCached();
+    const filtered = official.filter((station) => distanceKm(lat, lon, station.lat, station.lon) <= radiusKm);
+
+    return {
+      source: "official",
+      updatedAt: cache.updatedAt ? new Date(cache.updatedAt).toISOString() : new Date().toISOString(),
+      stations: filtered,
+    };
+  } catch (officialError) {
+    const fallbackStations = await fetchFallbackAround(lat, lon, radiusKm);
+    return {
+      source: "fallback",
+      updatedAt: new Date().toISOString(),
+      stations: fallbackStations,
+    };
+  }
+}
+
+function mergeStationsById(groups) {
+  const merged = new Map();
+
+  groups.flat().forEach((station) => {
+    if (!station) return;
+    merged.set(station.id, station);
+  });
+
+  return [...merged.values()];
+}
+
 async function stationsAroundHandler(req, res) {
   try {
     const lat = Number(req.query.lat);
@@ -215,27 +969,102 @@ async function stationsAroundHandler(req, res) {
 
     const safeRadius = Number.isFinite(radius) ? Math.max(1, Math.min(radius, 500)) : 20;
 
-    try {
-      const officialStations = await fetchOfficialStationsAround(lat, lon, safeRadius);
+    const shouldQueryFrance = circleIntersectsBounds(lat, lon, safeRadius, FRANCE_BOUNDS);
+    const shouldQueryGermany = circleIntersectsBounds(lat, lon, safeRadius, GERMANY_BOUNDS);
+    const shouldQueryUk = circleIntersectsBounds(lat, lon, safeRadius, UK_BOUNDS);
+    const shouldQueryBenelux = circleIntersectsBounds(lat, lon, safeRadius, BENELUX_BOUNDS);
 
+    const sourceRequests = [];
+
+    if (shouldQueryFrance) {
+      sourceRequests.push(fetchFranceAround(lat, lon, safeRadius));
+    }
+
+    if (shouldQueryGermany) {
+      sourceRequests.push(
+        fetchGermanyAround(lat, lon, safeRadius).then((stations) => ({
+          source: "tankerkonig",
+          updatedAt: new Date().toISOString(),
+          stations,
+        }))
+      );
+    }
+
+    if (shouldQueryUk) {
+      sourceRequests.push(
+        fetchUkAround(lat, lon, safeRadius).then((ukPayload) => ({
+          source: ukPayload.source,
+          updatedAt: new Date().toISOString(),
+          stations: ukPayload.stations,
+          failedSources: ukPayload.failedSources || [],
+        }))
+      );
+    }
+
+    if (shouldQueryBenelux) {
+      sourceRequests.push(
+        fetchBeneluxAround(lat, lon, safeRadius).then((beneluxPayload) => ({
+          source: beneluxPayload.source,
+          updatedAt: new Date().toISOString(),
+          stations: beneluxPayload.stations,
+          failedSources: beneluxPayload.failedSources || [],
+        }))
+      );
+    }
+
+    if (sourceRequests.length === 0) {
       res.json({
-        source: "official",
+        source: "none",
         updatedAt: new Date().toISOString(),
-        count: officialStations.length,
-        stations: officialStations,
-      });
-      return;
-    } catch (officialError) {
-      const fallbackStations = await fetchFallbackAround(lat, lon, safeRadius);
-      res.json({
-        source: "fallback",
-        updatedAt: new Date().toISOString(),
-        count: fallbackStations.length,
-        stations: fallbackStations,
+        count: 0,
+        stations: [],
       });
       return;
     }
+
+    const settled = await Promise.allSettled(sourceRequests);
+    const fulfilled = settled.filter((result) => result.status === "fulfilled").map((result) => result.value);
+    const rejected = settled
+      .filter((result) => result.status === "rejected")
+      .map((result) => String(result.reason?.message || "source error"));
+
+    const partialFailures = fulfilled
+      .flatMap((entry) => (Array.isArray(entry.failedSources) ? entry.failedSources : []))
+      .filter(Boolean);
+
+    if (fulfilled.length === 0) {
+      res.json({
+        source: "unavailable",
+        sources: [],
+        failedSources: rejected,
+        updatedAt: new Date().toISOString(),
+        count: 0,
+        stations: [],
+      });
+      return;
+    }
+
+    const combinedStations = mergeStationsById(fulfilled.map((entry) => entry.stations));
+    const nonEmptyFulfilled = fulfilled.filter((entry) => Array.isArray(entry.stations) && entry.stations.length > 0);
+    const sourceBase = nonEmptyFulfilled.length > 0 ? nonEmptyFulfilled : fulfilled;
+    const sources = [...new Set(sourceBase.map((entry) => entry.source))];
+    const updatedAt = fulfilled
+      .map((entry) => entry.updatedAt)
+      .filter(Boolean)
+      .sort()
+      .at(-1);
+
+    res.json({
+      source: sources.length === 1 ? sources[0] : "mixed",
+      sources,
+      failedSources: [...partialFailures, ...rejected],
+      updatedAt: updatedAt || new Date().toISOString(),
+      count: combinedStations.length,
+      stations: combinedStations,
+    });
+    return;
   } catch (error) {
+    console.error("stationsAroundHandler error:", error);
     res.status(500).json({ error: "Erreur serveur" });
   }
 }

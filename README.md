@@ -30,10 +30,15 @@ Ouvre ensuite dans ton navigateur: http://localhost:8080
 Source principale:
 
 - API officielle Etat: `data.economie.gouv.fr` (dataset flux instantané v2)
+- API Allemagne: `Tankerkönig` pour les recherches situées en Allemagne
 
 Source de secours (fallback si indisponibilité API):
 
 - API `https://api.prix-carburants.2aaz.fr`
+
+Configuration optionnelle:
+
+- `TANKERKOENIG_API_KEY` pour surcharger la clé Tankerkönig utilisée par le backend
 
 Le backend met en cache les données et expose l'endpoint local:
 
