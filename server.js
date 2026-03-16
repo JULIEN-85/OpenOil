@@ -78,7 +78,6 @@ const BENELUX_BOUNDS = {
   minLon: 2.4,
   maxLon: 7.4,
 };
-const STALE_HIDE_DAYS = 60;
 const MAX_STATIONS_PER_QUERY = 5000;
 
 let cache = {
