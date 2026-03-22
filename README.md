@@ -1,58 +1,82 @@
 # OpenOil
 
-Application web simple pour visualiser des stations-service sur une carte avec:
+OpenOil is a web app that helps you discover nearby fuel stations on an interactive map, compare prices, and monitor live updates.
 
-- disponibilités carburants
-- prix par carburant
-- comparaison de prix dans un rayon de 10, 20, 30, 40, 50 km
-- données live via backend local
-- rafraîchissement automatique toutes les 60 secondes
-- liste des stations affichées triée du moins cher au plus cher
+## Features
 
-## Lancer le site en local
+- Fuel availability by type (diesel, SP95, SP98, E10, E85, LPG)
+- Live prices by fuel type
+- Radius-based comparison and ranking
+- Station list sorting (price, distance, price+distance compromise)
+- Automatic refresh every 60 seconds
+- Multi-country data aggregation (France, Germany, UK, Benelux depending on location)
+- Mobile-first tabbed experience (filters, list, map)
+- Dedicated mobile-view page for desktop preview
 
-Installe d'abord les dépendances:
+## Run Locally
+
+Install dependencies:
 
 ```bash
 npm install
 ```
 
-Puis lance le serveur applicatif:
+Start the app:
 
 ```bash
 npm start
 ```
 
-Ouvre ensuite dans ton navigateur: http://localhost:8080
+Then open:
 
-## Données
+```text
+http://localhost:8080
+```
 
-Source principale:
+## API Endpoints
 
-- API officielle Etat: `data.economie.gouv.fr` (dataset flux instantané v2)
-- API Allemagne: `Tankerkönig` pour les recherches situées en Allemagne
+### Around mode
 
-Source de secours (fallback si indisponibilité API):
+```http
+GET /api/stations/around?lat={lat}&lon={lon}&radius={km}
+```
 
-- API `https://api.prix-carburants.2aaz.fr`
+Returns stations near a coordinate, with merged sources depending on geographic bounds.
 
-Configuration optionnelle:
+### Free mode
 
-- `TANKERKOENIG_API_KEY` pour surcharger la clé Tankerkönig utilisée par le backend
+```http
+GET /api/stations/free
+```
 
-Le backend met en cache les données et expose l'endpoint local:
+Returns a larger cached dataset for free exploration mode.
 
-- `GET /api/stations/around?lat={lat}&lon={lon}&radius={km}`
+## Data Sources
 
-## Deployer sur Vercel
+Primary / regional sources:
 
-Ce projet est configure pour Vercel avec:
+- France official open data (`data.economie.gouv.fr`)
+- Germany (`Tankerkonig`)
+- UK feeds (Mapbox fuel feed + CMA-compatible sources)
+- Benelux feeds (DirectLease and ANWB)
 
-- `api/index.js` comme fonction serverless (Express)
-- `vercel.json` pour router `/api/*` vers Express et servir le frontend statique
-- Requêtes géofiltrées vers l'API officielle (pas de cache global en mémoire)
+Fallback:
 
-Etapes:
+- `https://api.prix-carburants.2aaz.fr`
+
+Optional environment variable:
+
+- `TANKERKOENIG_API_KEY` (override default Tankerkonig key)
+
+## Deployment (Vercel)
+
+The project is ready for Vercel with:
+
+- `api/index.js` as the serverless Express entrypoint
+- `vercel.json` rewrite rules routing `/api/*` to Express
+- Static frontend served from the project root
+
+Deploy steps:
 
 ```bash
 npm i -g vercel
@@ -60,7 +84,7 @@ vercel
 vercel --prod
 ```
 
-L'URL de production Vercel servira:
+Production URL serves:
 
-- le site sur `/`
-- l'API sur `/api/stations/around?lat={lat}&lon={lon}&radius={km}`
+- Frontend at `/`
+- API at `/api/stations/around` and `/api/stations/free`
