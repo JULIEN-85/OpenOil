@@ -126,13 +126,13 @@ body.mobile-tab-map {
   color: #ffffff;
   border-color: #0f46c8;
 }
-
+/*
 @media (max-width: 720px) {
   .btn-toggle-mobile {
-    display: none;
+    display: on;
   }
 }
-
+*/
 /* ============================================
    INDICATEUR DE PROGRESSION & STATUT
    ============================================ */
@@ -846,46 +846,12 @@ h2::before {
   background: #9aa5b1;
 }
 
-/* ============================================
-   RESPONSIVE - Desktop MOYEN (950px breakpoint)
-   ============================================ */
-
-@media (max-width: 950px) {
-  body {
-    overflow-y: auto;
-  }
-
-  .loading-progress {
-    width: 100%;
-  }
-
-  /* Grille une colonne - empilage vertical */
-  .layout {
-    grid-template-columns: 1fr;
-    flex: unset;
-    height: auto;
-    min-height: 0;
-    overflow: visible;
-  }
-
-  /* Carte réduite */
-  .map-wrap {
-    order: 1;
-    height: 50dvh;
-    min-height: 360px;
-  }
-
-  /* Panneaux en dessous */
-  .panel {
-    order: 2;
-  }
-}
 
 /* ============================================
-   RESPONSIVE - MOBILE (720px breakpoint)
+   RESPONSIVE - MOBILE (2560px breakpoint)
    ============================================ */
 
-@media (max-width: 720px) {
+@media (max-width: 6000px) {
   .topbar {
     padding: 12px 14px;
     flex-shrink: 0;
@@ -1068,6 +1034,7 @@ h2::before {
 
   body.mobile-tab-map .map-wrap {
     display: flex;
+    flex-direction: column;
     flex: 1;
     border: 0;
     border-radius: 16px;
@@ -1075,12 +1042,14 @@ h2::before {
     margin: 0;
     height: 100%;
     min-height: 0;
+    max-height: 100%;
     overflow: hidden;
   }
 
   body.mobile-tab-map #map {
     width: 100%;
     height: 100%;
+    max-height: 100%;
     min-height: auto;
 
     /* ============================================

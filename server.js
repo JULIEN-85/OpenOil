@@ -49,6 +49,7 @@ const TANKERKOENIG_API_KEY = String(
   .replace(/\s+/g, "")
   .trim();
 const CACHE_TTL_MS = 2 * 60 * 1000;
+const FREE_CACHE_TTL_MS = 5 * 60 * 1000;
 const STALE_HIDE_DAYS = 60;
 const GERMANY_API_RADIUS_KM = 24;
 const GERMANY_MAX_RADIUS_KM = 100;
@@ -85,6 +86,17 @@ let cache = {
   stations: [],
 };
 
+let officialCachePromise = null;
+
+let freeModeCache = {
+  updatedAt: 0,
+  stations: [],
+  sources: [],
+  failedSources: [],
+};
+
+let freeModeCachePromise = null;
+
 const fuelFieldMap = {
   gazole: "gazole",
   sp95: "sp95",
@@ -93,6 +105,29 @@ const fuelFieldMap = {
   e85: "e85",
   gpl: "gplc",
 };
+
+const UNKNOWN_UPDATE_TEXT = "Non communiquee";
+
+function resolveUpdateText(dateOrNull, explicitText) {
+  if (typeof explicitText === "string" && explicitText.trim().length > 0) {
+    return explicitText.trim();
+  }
+
+  if (dateOrNull instanceof Date && !Number.isNaN(dateOrNull.getTime())) {
+    return dateOrNull.toLocaleString("fr-FR");
+  }
+
+  return UNKNOWN_UPDATE_TEXT;
+}
+
+function buildFuelEntry(type, price, available, dateOrNull = null, explicitText = null) {
+  return {
+    type,
+    price,
+    available,
+    update: resolveUpdateText(dateOrNull, explicitText),
+  };
+}
 
 function distanceKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
@@ -176,6 +211,7 @@ function normalizeOfficialStation(record) {
   const station = {
     id: `off-${record.id}`,
     name: record.adresse || `Station ${record.id}`,
+    country: "FR",
     city: record.ville || "",
     lat,
     lon,
@@ -195,11 +231,7 @@ function normalizeOfficialStation(record) {
 
     const available = !ruptureType && !isTooOld(majDate);
 
-    station.fuels[clientKey] = {
-      price,
-      available,
-      update: majDate ? majDate.toLocaleString("fr-FR") : null,
-    };
+    station.fuels[clientKey] = buildFuelEntry(clientKey, price, available, majDate);
 
     if (majDate && (!newestUpdate || majDate > newestUpdate)) {
       newestUpdate = majDate;
@@ -240,6 +272,54 @@ async function fetchOfficialStationsAround(lat, lon, radiusKm) {
   return all.map(normalizeOfficialStation).filter(Boolean);
 }
 
+async function fetchOfficialStationsAll() {
+  const limit = 100;
+  let offset = 0;
+  const all = [];
+
+  for (;;) {
+    const url = `${OFFICIAL_API_BASE}?limit=${limit}&offset=${offset}`;
+    const response = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!response.ok) throw new Error(`official api ${response.status}`);
+
+    const json = await response.json();
+    const rows = Array.isArray(json.results) ? json.results : [];
+    all.push(...rows);
+
+    if (rows.length < limit) break;
+    offset += limit;
+
+    if (offset > MAX_STATIONS_PER_QUERY) break;
+  }
+
+  return all.map(normalizeOfficialStation).filter(Boolean);
+}
+
+async function getOfficialStationsCached() {
+  if (Date.now() - cache.updatedAt < CACHE_TTL_MS && cache.stations.length > 0) {
+    return cache.stations;
+  }
+
+  if (officialCachePromise) {
+    return officialCachePromise;
+  }
+
+  officialCachePromise = (async () => {
+    try {
+      const stations = await fetchOfficialStationsAll();
+      cache = {
+        updatedAt: Date.now(),
+        stations,
+      };
+      return stations;
+    } finally {
+      officialCachePromise = null;
+    }
+  })();
+
+  return officialCachePromise;
+}
+
 function mapApiFuelToKey(fuel) {
   const byId = { 1: "gazole", 2: "sp95", 3: "e85", 4: "gpl", 5: "e10", 6: "sp98" };
   if (byId[fuel.id]) return byId[fuel.id];
@@ -264,9 +344,13 @@ function normalizeFallbackStation(raw) {
     const price = fuel?.Price?.value;
     if (!key || typeof price !== "number") return;
     fuels[key] = {
-      price,
-      available: Boolean(fuel.available),
-      update: fuel?.Update?.text || null,
+      ...buildFuelEntry(
+        key,
+        price,
+        Boolean(fuel.available),
+        parseDateMaybe(fuel?.Update?.value || fuel?.Update?.date || null),
+        fuel?.Update?.text || null
+      ),
     };
   });
 
@@ -275,6 +359,7 @@ function normalizeFallbackStation(raw) {
   return {
     id: `fb-${raw.id}`,
     name: raw.name || `Station ${raw.id}`,
+    country: "FR",
     city: raw?.Address?.city_line || "",
     lat,
     lon,
@@ -290,17 +375,18 @@ function normalizeGermanyStation(raw) {
 
   const fuels = {};
   const available = Boolean(raw?.isOpen);
+  const stationUpdated = parseDateMaybe(raw?.date || raw?.updatedAt || raw?.lastUpdate || null);
 
   if (typeof raw?.diesel === "number") {
-    fuels.gazole = { price: raw.diesel, available, update: null };
+    fuels.gazole = buildFuelEntry("gazole", raw.diesel, available, stationUpdated);
   }
 
   if (typeof raw?.e5 === "number") {
-    fuels.sp95 = { price: raw.e5, available, update: null };
+    fuels.sp95 = buildFuelEntry("sp95", raw.e5, available, stationUpdated);
   }
 
   if (typeof raw?.e10 === "number") {
-    fuels.e10 = { price: raw.e10, available, update: null };
+    fuels.e10 = buildFuelEntry("e10", raw.e10, available, stationUpdated);
   }
 
   if (Object.keys(fuels).length === 0) return null;
@@ -310,10 +396,11 @@ function normalizeGermanyStation(raw) {
   return {
     id: `de-${raw?.id || raw?.uuid || stationName}`,
     name: stationName,
+    country: "DE",
     city: raw?.place || "",
     lat,
     lon,
-    lastUpdateText: null,
+    lastUpdateText: resolveUpdateText(stationUpdated, null),
     fuels,
   };
 }
@@ -401,7 +488,7 @@ function dedupeStationsPreferNewest(stations) {
   return [...byIdentity.values()];
 }
 
-function normalizeUkStation(feature) {
+function normalizeUkStation(feature, datasetUpdatedAt = null) {
   const coords = feature?.geometry?.coordinates;
   const lon = Array.isArray(coords) ? Number(coords[0]) : NaN;
   const lat = Array.isArray(coords) ? Number(coords[1]) : NaN;
@@ -416,10 +503,14 @@ function normalizeUkStation(feature) {
       const price = Number(value?.price);
       if (!key || !Number.isFinite(price)) return;
 
+      const fuelUpdated =
+        parseDateMaybe(value?.updatedAt || value?.updated || value?.last_updated || null) ||
+        parseDateMaybe(props?.updatedAt || props?.updated || props?.last_updated || null) ||
+        datasetUpdatedAt ||
+        null;
+
       fuels[key] = {
-        price,
-        available: true,
-        update: null,
+        ...buildFuelEntry(key, price, true, fuelUpdated, null),
       };
     });
   }
@@ -430,15 +521,21 @@ function normalizeUkStation(feature) {
       const price = Number(rawPrice);
       if (!key || !Number.isFinite(price)) return;
 
+      const fuelUpdated =
+        parseDateMaybe(props?.updatedAt || props?.updated || props?.last_updated || null) ||
+        datasetUpdatedAt ||
+        null;
+
       fuels[key] = {
-        price,
-        available: true,
-        update: null,
+        ...buildFuelEntry(key, price, true, fuelUpdated, null),
       };
     });
   }
 
   if (Object.keys(fuels).length === 0) return null;
+
+  const stationUpdated =
+    parseDateMaybe(props?.updatedAt || props?.updated || props?.last_updated || null) || datasetUpdatedAt || null;
 
   const stationId = props.station_id || `${props.brand || "UK"}-${lat.toFixed(5)}-${lon.toFixed(5)}`;
   const stationName = props.brand || props.title || `Station ${stationId}`;
@@ -446,11 +543,12 @@ function normalizeUkStation(feature) {
   return {
     id: `uk-${stationId}`,
     name: stationName,
+    country: "GB",
     city: props.postcode || "",
     lat,
     lon,
-    lastUpdateText: null,
-    updatedAtIso: null,
+    lastUpdateText: resolveUpdateText(stationUpdated, null),
+    updatedAtIso: stationUpdated ? stationUpdated.toISOString() : null,
     fuels,
   };
 }
@@ -460,6 +558,7 @@ function normalizeCmaUkStation(raw, providerName, datasetUpdatedAt) {
   const lon = Number(raw?.location?.longitude);
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
 
+  const stationUpdated = parseDateMaybe(raw?.updated || raw?.last_updated) || datasetUpdatedAt || null;
   const fuels = {};
   const prices = raw?.prices && typeof raw.prices === "object" ? raw.prices : {};
 
@@ -469,24 +568,22 @@ function normalizeCmaUkStation(raw, providerName, datasetUpdatedAt) {
     if (!fuelKey || !Number.isFinite(price)) return;
 
     fuels[fuelKey] = {
-      price,
-      available: true,
-      update: null,
+      ...buildFuelEntry(fuelKey, price, true, stationUpdated),
     };
   });
 
   if (Object.keys(fuels).length === 0) return null;
 
-  const stationUpdated = parseDateMaybe(raw?.updated || raw?.last_updated) || datasetUpdatedAt || null;
   const stationId = raw?.site_id || `${providerName}-${lat.toFixed(5)}-${lon.toFixed(5)}`;
 
   return {
     id: `ukcma-${providerName}-${stationId}`,
     name: raw?.brand || providerName.toUpperCase(),
+    country: "GB",
     city: raw?.postcode || "",
     lat,
     lon,
-    lastUpdateText: stationUpdated ? stationUpdated.toLocaleString("en-GB") : null,
+    lastUpdateText: resolveUpdateText(stationUpdated, null),
     updatedAtIso: stationUpdated ? stationUpdated.toISOString() : null,
     fuels,
   };
@@ -509,11 +606,15 @@ async function fetchUkFuelFeedAround(lat, lon, radiusKm) {
   }
 
   const payload = await response.json();
+  const datasetUpdatedAt =
+    parseDateMaybe(payload?.last_updated || payload?.updatedAt || payload?.generatedAt || null) ||
+    parseDateMaybe(response.headers.get("last-modified") || response.headers.get("date") || null) ||
+    new Date();
   const features = Array.isArray(payload?.features) ? payload.features : [];
   const uniqueById = new Map();
 
   features.forEach((feature) => {
-    const normalized = normalizeUkStation(feature);
+    const normalized = normalizeUkStation(feature, datasetUpdatedAt);
     if (!normalized) return;
 
     const d = distanceKm(lat, lon, normalized.lat, normalized.lon);
@@ -561,6 +662,54 @@ async function fetchUkCmaAround(lat, lon, radiusKm) {
         const d = distanceKm(lat, lon, normalized.lat, normalized.lon);
         if (d > safeRadius) return;
 
+        allStations.push(normalized);
+      });
+    })
+  );
+
+  results.forEach((result) => {
+    if (result.status === "rejected") {
+      failedFeeds.push(String(result.reason?.message || "uk-cma feed error"));
+    }
+  });
+
+  return {
+    stations: dedupeStationsPreferNewest(allStations),
+    failedFeeds,
+  };
+}
+
+async function fetchUkCmaAll() {
+  const allStations = [];
+  const failedFeeds = [];
+
+  const results = await Promise.allSettled(
+    UK_CMA_FEEDS.map(async (feed) => {
+      const response = await fetch(feed.url, {
+        headers: {
+          Accept: "application/json,text/plain,*/*",
+          "User-Agent": "Mozilla/5.0",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`${feed.provider}: ${response.status}`);
+      }
+
+      const text = await response.text();
+      let payload = null;
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        throw new Error(`${feed.provider}: invalid json`);
+      }
+
+      const feedUpdatedAt = parseDateMaybe(payload?.last_updated || payload?.lastUpdated || null);
+      const rawStations = Array.isArray(payload?.stations) ? payload.stations : [];
+
+      rawStations.forEach((rawStation) => {
+        const normalized = normalizeCmaUkStation(rawStation, feed.provider, feedUpdatedAt);
+        if (!normalized) return;
         allStations.push(normalized);
       });
     })
@@ -626,9 +775,13 @@ function normalizeBeneluxAnwbStation(raw, fallbackName = "Benelux station") {
     if (!fuelKey || !Number.isFinite(price)) return;
 
     fuels[fuelKey] = {
-      price,
-      available: true,
-      update: null,
+      ...buildFuelEntry(
+        fuelKey,
+        price,
+        true,
+        parseDateMaybe(priceItem?.updatedAt || priceItem?.updated || priceItem?.lastUpdated || null),
+        null
+      ),
     };
   });
 
@@ -641,10 +794,11 @@ function normalizeBeneluxAnwbStation(raw, fallbackName = "Benelux station") {
   return {
     id: `benelux-anwb-${stationId}`,
     name: raw?.title || fallbackName,
+    country: String(address.countryCode || raw?.countryCode || "BENELUX").toUpperCase(),
     city,
     lat,
     lon,
-    lastUpdateText: null,
+    lastUpdateText: resolveUpdateText(parseDateMaybe(raw?.updatedAt || raw?.updated || null), null),
     updatedAtIso: null,
     fuels,
   };
@@ -670,9 +824,13 @@ function normalizeBeneluxDirectLeaseStation(detail, baseStation) {
       if (!fuelKey || !Number.isFinite(price)) return;
 
       fuels[fuelKey] = {
-        price,
-        available: true,
-        update: null,
+        ...buildFuelEntry(
+          fuelKey,
+          price,
+          true,
+          parseDateMaybe(fuelItem?.updatedAt || fuelItem?.updated || fuelItem?.lastUpdated || null),
+          null
+        ),
       };
     });
   });
@@ -686,6 +844,7 @@ function normalizeBeneluxDirectLeaseStation(detail, baseStation) {
   return {
     id: `benelux-dl-${stationId}`,
     name: detail?.name || baseStation?.name || "Benelux station",
+    country: String(detail?.country || detail?.countryCode || baseStation?.country || "BENELUX").toUpperCase(),
     city: detail?.city || baseStation?.city || "",
     lat,
     lon,
@@ -879,6 +1038,143 @@ async function fetchGermanyAround(lat, lon, radiusKm) {
   return [...uniqueById.values()];
 }
 
+async function fetchGermanyWide() {
+  const hubs = [
+    { lat: 53.55, lon: 10.0 }, // Hamburg
+    { lat: 52.52, lon: 13.405 }, // Berlin
+    { lat: 50.94, lon: 6.96 }, // Cologne
+    { lat: 50.11, lon: 8.68 }, // Frankfurt
+    { lat: 48.14, lon: 11.58 }, // Munich
+    { lat: 48.78, lon: 9.18 }, // Stuttgart
+    { lat: 51.34, lon: 12.37 }, // Leipzig
+    { lat: 53.08, lon: 8.8 }, // Bremen
+  ];
+
+  const settled = await Promise.allSettled(
+    hubs.map((hub) => fetchGermanyAround(hub.lat, hub.lon, GERMANY_MAX_RADIUS_KM))
+  );
+
+  const stations = [];
+  const failedFeeds = [];
+
+  settled.forEach((result) => {
+    if (result.status === "fulfilled") {
+      stations.push(...result.value);
+      return;
+    }
+
+    failedFeeds.push(String(result.reason?.message || "tankerkonig wide error"));
+  });
+
+  return {
+    stations: dedupeStationsPreferNewest(stations),
+    failedFeeds,
+  };
+}
+
+async function fetchBeneluxWide() {
+  const centerLat = (BENELUX_BOUNDS.minLat + BENELUX_BOUNDS.maxLat) / 2;
+  const centerLon = (BENELUX_BOUNDS.minLon + BENELUX_BOUNDS.maxLon) / 2;
+
+  const anwbStations = await fetchBeneluxAnwbAround(centerLat, centerLon, BENELUX_MAX_RADIUS_KM);
+  return {
+    stations: anwbStations,
+    failedFeeds: [],
+  };
+}
+
+async function collectFreeModeStations() {
+  const sourceRequests = [
+    fetchFranceAround(46.6, 2.4, 1000),
+    fetchGermanyWide().then((payload) => ({
+      source: "tankerkonig",
+      updatedAt: new Date().toISOString(),
+      stations: payload.stations,
+      failedSources: payload.failedFeeds,
+    })),
+    fetchUkCmaAll().then((payload) => ({
+      source: "cma-uk",
+      updatedAt: new Date().toISOString(),
+      stations: payload.stations,
+      failedSources: payload.failedFeeds,
+    })),
+    fetchBeneluxWide().then((payload) => ({
+      source: "anwb-benelux",
+      updatedAt: new Date().toISOString(),
+      stations: payload.stations,
+      failedSources: payload.failedFeeds,
+    })),
+  ];
+
+  const settled = await Promise.allSettled(sourceRequests);
+  const fulfilled = settled.filter((result) => result.status === "fulfilled").map((result) => result.value);
+  const rejected = settled
+    .filter((result) => result.status === "rejected")
+    .map((result) => String(result.reason?.message || "source error"));
+
+  const partialFailures = fulfilled
+    .flatMap((entry) => (Array.isArray(entry.failedSources) ? entry.failedSources : []))
+    .filter(Boolean);
+
+  const combinedStations = dedupeStationsPreferNewest(mergeStationsById(fulfilled.map((entry) => entry.stations)));
+  const nonEmptyFulfilled = fulfilled.filter((entry) => Array.isArray(entry.stations) && entry.stations.length > 0);
+  const sourceBase = nonEmptyFulfilled.length > 0 ? nonEmptyFulfilled : fulfilled;
+  const sources = [...new Set(sourceBase.map((entry) => entry.source))];
+  const updatedAt = fulfilled
+    .map((entry) => entry.updatedAt)
+    .filter(Boolean)
+    .sort()
+    .at(-1);
+
+  return {
+    source: sources.length === 1 ? sources[0] : "mixed",
+    sources,
+    failedSources: [...partialFailures, ...rejected],
+    updatedAt: updatedAt || new Date().toISOString(),
+    count: combinedStations.length,
+    stations: combinedStations,
+  };
+}
+
+async function getFreeModeStationsCached() {
+  if (Date.now() - freeModeCache.updatedAt < FREE_CACHE_TTL_MS && freeModeCache.stations.length > 0) {
+    return {
+      source: freeModeCache.sources.length === 1 ? freeModeCache.sources[0] : "mixed",
+      sources: freeModeCache.sources,
+      failedSources: freeModeCache.failedSources,
+      updatedAt: new Date(freeModeCache.updatedAt).toISOString(),
+      count: freeModeCache.stations.length,
+      stations: freeModeCache.stations,
+      cacheState: "hit",
+    };
+  }
+
+  if (freeModeCachePromise) {
+    return freeModeCachePromise;
+  }
+
+  freeModeCachePromise = (async () => {
+    try {
+      const payload = await collectFreeModeStations();
+      freeModeCache = {
+        updatedAt: Date.now(),
+        stations: payload.stations,
+        sources: payload.sources,
+        failedSources: payload.failedSources,
+      };
+
+      return {
+        ...payload,
+        cacheState: "refresh",
+      };
+    } finally {
+      freeModeCachePromise = null;
+    }
+  })();
+
+  return freeModeCachePromise;
+}
+
 async function fetchFallbackAround(lat, lon, radiusKm) {
   const pageSize = 20;
   const maxPages = 200;
@@ -1068,8 +1364,20 @@ async function stationsAroundHandler(req, res) {
   }
 }
 
+async function stationsFreeHandler(req, res) {
+  try {
+    const payload = await getFreeModeStationsCached();
+    res.json(payload);
+  } catch (error) {
+    console.error("stationsFreeHandler error:", error);
+    res.status(500).json({ error: "Erreur serveur mode libre" });
+  }
+}
+
 app.get("/api/stations/around", stationsAroundHandler);
 app.get("/stations/around", stationsAroundHandler);
+app.get("/api/stations/free", stationsFreeHandler);
+app.get("/stations/free", stationsFreeHandler);
 
 app.use(express.static(path.join(__dirname)));
 
